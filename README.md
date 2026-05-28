@@ -140,6 +140,10 @@ CLI arguments always override config file values.
 | `Could not find a SolidWorks part template` | Set `sw_template` in your config file or pass `--template` |
 | Revolve fails | Usually a profile gap — check that front/back surface numbers are adjacent in the LDE |
 
+## Acknowledgments
+
+Developed with assistance from GitHub Copilot (Claude Opus 4, Anthropic).
+
 ## License
 
 MIT
