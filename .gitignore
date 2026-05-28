@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# User-specific config (contains local paths)
+zemax_to_solidworks.json
+
+# Original dev script (not for public)
+zemax_to_solidworks.py
+prompt.txt
+
+# IDE
+.vscode/
+*.swp
