@@ -2,6 +2,10 @@
 
 Automatically converts lens surfaces from a Zemax OpticStudio `.zmx` file into a revolved solid body in SolidWorks — bridging optical design and mechanical CAD without manual re-entry of surface geometry.
 
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/RoA6LLUXmvY/maxresdefault.jpg)](https://youtu.be/RoA6LLUXmvY)
+
 ## Why This Exists
 
 Optical designers define lens surfaces in Zemax (radii, conics, aspheric coefficients), but mechanical engineers need those same surfaces as solid models in SolidWorks for tolerancing, packaging, and assembly. Manually recreating aspheric profiles from coefficient tables is tedious and error-prone. This script automates the full pipeline in seconds.
