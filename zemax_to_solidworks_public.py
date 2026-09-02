@@ -536,8 +536,9 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
 
     # --- Draw the profile ---
     # Right YZ Plane sketch: sketch coords are (sketch_x, sketch_y, 0).
-    # We map: radial → sketch_x (horizontal), optical_axis → sketch_y (vertical).
-    # So profile point (optical_axis, radial) → sketch (radial, optical_axis, 0).
+    # For this plane, sketch_x → model Z, sketch_y → model Y.
+    # We map: optical_axis → sketch_x (horizontal, model Z), radial → sketch_y (vertical, model Y).
+    # So profile point (optical_axis, radial) → sketch (optical_axis, radial, 0).
     # SolidWorks API uses meters.
     scale = 0.001  # mm to meters
 
@@ -580,23 +581,23 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
 
     if front_is_flat:
         seg = swModel.SketchManager.CreateLine(
-            front_pts[0][1] * scale, front_pts[0][0] * scale, 0.0,
-            front_pts[-1][1] * scale, front_pts[-1][0] * scale, 0.0
+            front_pts[0][0] * scale, front_pts[0][1] * scale, 0.0,
+            front_pts[-1][0] * scale, front_pts[-1][1] * scale, 0.0
         )
         print(f"  Front surface line (plano): {seg}")
     elif is_spherical(front_data):
         R = front_data['radius']
         seg = swModel.SketchManager.CreateArc(
-            0.0, R * scale, 0.0,                                    # center
-            front_pts[0][1] * scale, front_pts[0][0] * scale, 0.0,  # start (vertex)
-            front_pts[-1][1] * scale, front_pts[-1][0] * scale, 0.0,  # end (edge)
-            1 if R > 0 else -1                                      # direction
+            R * scale, 0.0, 0.0,                                    # center
+            front_pts[0][0] * scale, front_pts[0][1] * scale, 0.0,  # start (vertex)
+            front_pts[-1][0] * scale, front_pts[-1][1] * scale, 0.0,  # end (edge)
+            -1 if R > 0 else 1                                     # direction
         )
         print(f"  Front surface arc (R={R:.4f} mm): {seg}")
     else:
         spline_array_front = []
         for (px, py) in front_pts:
-            spline_array_front.extend([py * scale, px * scale, 0.0])
+            spline_array_front.extend([px * scale, py * scale, 0.0])
         pt_data = VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, spline_array_front)
         seg = swModel.SketchManager.CreateSpline2(pt_data, True)
         print(f"  Front surface spline ({num_points} pts): {seg}")
@@ -605,8 +606,8 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
     if front_has_flat:
         last_front = front_pts[-1]
         seg = swModel.SketchManager.CreateLine(
-            last_front[1] * scale, last_front[0] * scale, 0.0,
-            front_flat_pt[1] * scale, front_flat_pt[0] * scale, 0.0
+            last_front[0] * scale, last_front[1] * scale, 0.0,
+            front_flat_pt[0] * scale, front_flat_pt[1] * scale, 0.0
         )
         print(f"  Front flat line (SD {profile_info['front_sd']:.3f} → OD {semi_diam:.3f}): {seg}")
         connect_front = front_flat_pt
@@ -615,16 +616,16 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
 
     # --- Segment 3: Vertical edge line at OD ---
     seg = swModel.SketchManager.CreateLine(
-        connect_front[1] * scale, connect_front[0] * scale, 0.0,
-        edge_pt[1] * scale, edge_pt[0] * scale, 0.0
+        connect_front[0] * scale, connect_front[1] * scale, 0.0,
+        edge_pt[0] * scale, edge_pt[1] * scale, 0.0
     )
     print(f"  Edge line: {seg}")
 
     # --- Segment 4: Back flat annulus (horizontal/radial line from OD to back SD) ---
     if back_has_flat:
         seg = swModel.SketchManager.CreateLine(
-            edge_pt[1] * scale, edge_pt[0] * scale, 0.0,
-            back_flat_pt[1] * scale, back_flat_pt[0] * scale, 0.0
+            edge_pt[0] * scale, edge_pt[1] * scale, 0.0,
+            back_flat_pt[0] * scale, back_flat_pt[1] * scale, 0.0
         )
         print(f"  Back flat line (OD {semi_diam:.3f} → SD {profile_info['back_sd']:.3f}): {seg}")
         connect_back = back_flat_pt
@@ -636,31 +637,31 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
 
     if back_is_flat:
         seg = swModel.SketchManager.CreateLine(
-            back_pts[0][1] * scale, back_pts[0][0] * scale, 0.0,
-            back_pts[-1][1] * scale, back_pts[-1][0] * scale, 0.0
+            back_pts[0][0] * scale, back_pts[0][1] * scale, 0.0,
+            back_pts[-1][0] * scale, back_pts[-1][1] * scale, 0.0
         )
         print(f"  Back surface line (plano): {seg}")
     elif is_spherical(back_data):
         R = back_data['radius']
         seg = swModel.SketchManager.CreateArc(
-            0.0, (thickness + R) * scale, 0.0,                      # center
-            back_pts[0][1] * scale, back_pts[0][0] * scale, 0.0,    # start (edge)
-            back_pts[-1][1] * scale, back_pts[-1][0] * scale, 0.0,  # end (vertex)
-            -1 if R > 0 else 1                                      # direction (reversed traverse)
+            (thickness + R) * scale, 0.0, 0.0,                      # center
+            back_pts[0][0] * scale, back_pts[0][1] * scale, 0.0,    # start (edge)
+            back_pts[-1][0] * scale, back_pts[-1][1] * scale, 0.0,  # end (vertex)
+            1 if R > 0 else -1                                     # direction (reversed traverse)
         )
         print(f"  Back surface arc (R={R:.4f} mm): {seg}")
     else:
         spline_array_back = []
         for (px, py) in back_pts:
-            spline_array_back.extend([py * scale, px * scale, 0.0])
+            spline_array_back.extend([px * scale, py * scale, 0.0])
         pt_data = VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, spline_array_back)
         seg = swModel.SketchManager.CreateSpline2(pt_data, True)
         print(f"  Back surface spline ({num_points} pts): {seg}")
 
-    # --- Create construction centerline (revolve axis along sketch Y = optical axis) ---
+    # --- Create construction centerline (revolve axis along sketch X = optical axis = model Z) ---
     seg = swModel.SketchManager.CreateCenterLine(
-        0.0, -x_extent * scale, 0.0,
-        0.0, x_extent * scale, 0.0
+        -x_extent * scale, 0.0, 0.0,
+        x_extent * scale, 0.0, 0.0
     )
     print(f"  Centerline created: {seg} (extent={x_extent:.4f} mm)")
 
