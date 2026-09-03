@@ -454,52 +454,8 @@ def resolve_sw_template(swApp, template_path):
     )
 
 
-def build_solidworks_model(profile_points, semi_diam, thickness, num_points, config, surfaces, surf_front, surf_back, profile_info):
-    """
-    Create a revolved solid in SolidWorks from the lens profile.
-    Attaches to the already-running SolidWorks session.
-    """
-    print("\n" + "=" * 60)
-    print("Phase 3: Building SolidWorks model")
-    print("=" * 60)
-
-    # --- Connect to running SolidWorks ---
-    swApp = win32com.client.GetActiveObject("SldWorks.Application")
-    swApp.Visible = True
-    print("  Connected to running SolidWorks instance.")
-
-    # --- Constants ---
-    swUnitSystem_MMGS = 2
-
-    # --- Resolve template ---
-    defaultTemplate = resolve_sw_template(swApp, config.get("sw_template"))
-    print(f"  Using template: {defaultTemplate}")
-
-    swModel = swApp.NewDocument(defaultTemplate, 0, 0, 0)
-    print(f"  NewDocument returned: {type(swModel).__name__} = {swModel}")
-
-    # Get the active document reference
-    swModel = swApp.ActiveDoc
-    if swModel is None:
-        raise RuntimeError("Failed to create new part document in SolidWorks!")
-    try:
-        title = swModel.GetTitle
-        print(f"  New part created: {title}")
-    except Exception:
-        print(f"  New part created.")
-
-    # --- Set units to millimeters (MMGS) ---
-    swModelDocExt = swModel.Extension
-    try:
-        swModelDocExt.SetUserPreferenceInteger(175, 0, swUnitSystem_MMGS)
-    except Exception:
-        try:
-            swModelDocExt.SetUserPreferenceInteger(11, 0, 0)
-        except Exception:
-            pass  # Units may already be mm from template
-    print("  Units set to MMGS (millimeters).")
-
-    # --- Select the Right YZ Plane for sketching ---
+def _select_right_plane(swModel):
+    """Select the Right/YZ reference plane for sketching. Returns True on success."""
     swModel.ClearSelection2(True)
     plane_names = ["Right YZ Plane", "Right Plane", "Right", "RIGHT"]
     boolstatus = False
@@ -525,12 +481,17 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
             except Exception:
                 break
     print(f"  Plane selected: {boolstatus}")
+    return boolstatus
 
-    # --- Open sketch ---
-    swModel.SketchManager.InsertSketch(True)
-    skActive = swModel.SketchManager.ActiveSketch
-    print(f"  Sketch opened. Active sketch: {skActive}")
 
+def _draw_lens_profile(swModel, profile_points, semi_diam, thickness,
+                       num_points, surfaces, surf_front, surf_back, profile_info,
+                       create_centerline=True):
+    """Draw the lens half-profile (surfaces, flats, edge, centerline) into the
+    currently active sketch. A sketch must already be open before calling this.
+
+    If create_centerline is False, the construction centerline is not created
+    (used when updating a sketch whose existing centerline/axis was preserved)."""
     # Enable direct database mode for batch sketch entity creation
     swModel.SketchManager.AddToDB = True
 
@@ -658,23 +619,35 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
         seg = swModel.SketchManager.CreateSpline2(pt_data, True)
         print(f"  Back surface spline ({num_points} pts): {seg}")
 
-    # --- Create construction centerline (revolve axis along sketch X = optical axis = model Z) ---
-    seg = swModel.SketchManager.CreateCenterLine(
-        -x_extent * scale, 0.0, 0.0,
-        x_extent * scale, 0.0, 0.0
+    # --- Segment 6: Closing line along the optical axis (back vertex → front vertex) ---
+    # Explicitly closes the profile loop so the revolve gets a closed contour. In
+    # create-new this was implicit, but editing an existing sketch requires it.
+    front_vertex = front_pts[0]   # (0, 0) on axis
+    back_vertex = back_pts[-1]    # (thickness, 0) on axis
+    seg = swModel.SketchManager.CreateLine(
+        back_vertex[0] * scale, back_vertex[1] * scale, 0.0,
+        front_vertex[0] * scale, front_vertex[1] * scale, 0.0
     )
-    print(f"  Centerline created: {seg} (extent={x_extent:.4f} mm)")
+    print(f"  Axis closing line: {seg}")
+
+    # --- Create construction centerline (revolve axis along sketch X = optical axis = model Z) ---
+    if create_centerline:
+        seg = swModel.SketchManager.CreateCenterLine(
+            -x_extent * scale, 0.0, 0.0,
+            x_extent * scale, 0.0, 0.0
+        )
+        print(f"  Centerline created: {seg} (extent={x_extent:.4f} mm)")
+    else:
+        print("  Reusing existing centerline (axis reference preserved).")
 
     # Disable direct database mode
     swModel.SketchManager.AddToDB = False
 
-    # --- Exit sketch ---
-    swModel.SketchManager.InsertSketch(True)
-    print("  Sketch closed.")
 
-    # --- Perform revolve ---
+def _revolve_active_sketch(swModel, sketch_name="Sketch1"):
+    """Revolve the most recently created sketch 360° into a solid body."""
     swModel.ClearSelection2(True)
-    boolstatus = swModel.Extension.SelectByID2("Sketch1", "SKETCH", 0, 0, 0, False, 0, pythoncom.Nothing, 0)
+    boolstatus = swModel.Extension.SelectByID2(sketch_name, "SKETCH", 0, 0, 0, False, 0, pythoncom.Nothing, 0)
     if not boolstatus:
         feat = swModel.FeatureByPositionReverse(0)
         if feat is not None:
@@ -696,13 +669,223 @@ def build_solidworks_model(profile_points, semi_diam, thickness, num_points, con
     else:
         print("  WARNING: Revolve feature may have failed. Check SolidWorks for errors.")
         print("  You may need to manually select the profile and axis, then revolve.")
+    return swFeat
 
-    # --- Rebuild and zoom to fit ---
+
+def _rebuild_and_fit(swModel):
+    """Force a rebuild and zoom to fit."""
     try:
         swModel.ForceRebuild3(True)
     except Exception:
         pass
     swModel.ViewZoomtofit2()
+
+
+def _sketch_feature_names(swModel):
+    """Return the names of all sketch (ProfileFeature) features in the tree."""
+    names = []
+    i = 0
+    while True:
+        f = swModel.FeatureByPositionReverse(i)
+        if f is None:
+            break
+        try:
+            if f.GetTypeName2 == "ProfileFeature":
+                names.append(f.Name)
+        except Exception:
+            pass
+        i += 1
+        if i > 300:
+            break
+    return names
+
+
+def _clear_sketch_entities(swModel, keep_construction=False):
+    """Delete segments in the currently active (open) sketch.
+
+    If keep_construction is True, construction geometry (e.g. a centerline) is
+    preserved. Returns (deleted_count, kept_construction_count).
+    """
+    skActive = swModel.SketchManager.ActiveSketch
+    if skActive is None:
+        return 0, 0
+    # GetSketchSegments is exposed as a property (returns a tuple), not a method.
+    segs = skActive.GetSketchSegments
+    if not segs:
+        return 0, 0
+    swModel.ClearSelection2(True)
+    deleted = 0
+    kept = 0
+    for seg in segs:
+        try:
+            if keep_construction and seg.ConstructionGeometry:
+                kept += 1
+                continue
+            if seg.Select2(True, 0):  # (Append, Mark); Select4's Callout arg errors here
+                deleted += 1
+        except Exception:
+            pass
+    if deleted:
+        swModel.EditDelete()
+    swModel.ClearSelection2(True)
+    return deleted, kept
+
+
+def update_existing_model(profile_points, semi_diam, thickness, num_points, config,
+                          surfaces, surf_front, surf_back, profile_info, sketch_name="Sketch1"):
+    """
+    Update the lens in an ALREADY-OPEN part by editing an existing sketch in place.
+
+    The named sketch is opened, all of its entities are deleted, and the new closed
+    lens profile (with a fresh centerline) is drawn. Downstream features (the
+    revolve) stay in the tree, but since the old sketch entities are gone, the
+    revolve loses its profile/axis references and must be re-selected by the user
+    (SolidWorks does not allow repointing a revolve to a different sketch).
+
+    Falls back to adding a new sketch to the part if the named sketch is not found.
+    """
+    print("\n" + "=" * 60)
+    print("Phase 3: Updating existing sketch in the active part")
+    print("=" * 60)
+
+    swApp = win32com.client.GetActiveObject("SldWorks.Application")
+    swApp.Visible = True
+    print("  Connected to running SolidWorks instance.")
+
+    swModel = swApp.ActiveDoc
+    if swModel is None:
+        raise RuntimeError(
+            "No active document in SolidWorks. Open the target part and make it the "
+            "active window, then re-run with --update."
+        )
+    swDocPART = 1
+    if swModel.GetType != swDocPART:
+        raise RuntimeError("The active SolidWorks document is not a part (.sldprt).")
+    try:
+        print(f"  Active part: {swModel.GetTitle}")
+    except Exception:
+        pass
+
+    # Make sure we are not inside an open sketch from a prior operation
+    if swModel.SketchManager.ActiveSketch is not None:
+        swModel.SketchManager.InsertSketch(True)
+
+    # --- Edit the existing sketch in place ---
+    swModel.ClearSelection2(True)
+    found = swModel.Extension.SelectByID2(sketch_name, "SKETCH", 0, 0, 0, False, 0, pythoncom.Nothing, 0)
+    if found:
+        print(f"  Editing existing sketch '{sketch_name}' in place.")
+        swModel.EditSketch()
+        deleted, _ = _clear_sketch_entities(swModel, keep_construction=False)
+        print(f"  Cleared {deleted} existing sketch entities.")
+        _draw_lens_profile(swModel, profile_points, semi_diam, thickness,
+                           num_points, surfaces, surf_front, surf_back, profile_info,
+                           create_centerline=True)
+        swModel.SketchManager.InsertSketch(True)  # exit/close the sketch
+        print("  Sketch updated and closed.")
+        # No forced rebuild: the revolve references are broken until the user
+        # re-selects them, so rebuilding now would just raise an error dialog.
+        try:
+            swModel.ViewZoomtofit2()
+        except Exception:
+            pass
+        print(f"\n  Done! '{sketch_name}' now holds the new lens profile.")
+        print("  Next step in SolidWorks:")
+        print(f"    Edit your revolve feature and re-select the profile (the '{sketch_name}' "
+              "contour) and the axis (its centerline), then rebuild.")
+        print(f"  Lens diameter: {2 * semi_diam:.4f} mm  |  Center thickness: {thickness:.4f} mm")
+        return
+
+    # --- Fallback: named sketch not found, add a new one ---
+    print(f"  Sketch '{sketch_name}' not found. Adding a new lens sketch instead.")
+    before = set(_sketch_feature_names(swModel))
+    _select_right_plane(swModel)
+    swModel.SketchManager.InsertSketch(True)
+    print(f"  New sketch opened. Active sketch: {swModel.SketchManager.ActiveSketch}")
+    _draw_lens_profile(swModel, profile_points, semi_diam, thickness,
+                       num_points, surfaces, surf_front, surf_back, profile_info,
+                       create_centerline=True)
+    swModel.SketchManager.InsertSketch(True)  # exit/close the sketch
+    print("  Sketch closed.")
+    try:
+        swModel.ViewZoomtofit2()
+    except Exception:
+        pass
+    after = set(_sketch_feature_names(swModel))
+    new_names = sorted(after - before)
+    new_sketch = new_names[0] if new_names else "the new sketch"
+    print(f"\n  Done! New lens profile sketch added: {new_sketch}")
+    print("  Next step in SolidWorks:")
+    print(f"    Revolve '{new_sketch}' (about its centerline) to build the lens body.")
+    print(f"  Lens diameter: {2 * semi_diam:.4f} mm  |  Center thickness: {thickness:.4f} mm")
+
+
+def build_solidworks_model(profile_points, semi_diam, thickness, num_points, config, surfaces, surf_front, surf_back, profile_info):
+    """
+    Create a revolved solid in SolidWorks from the lens profile.
+    Attaches to the already-running SolidWorks session.
+    """
+    print("\n" + "=" * 60)
+    print("Phase 3: Building SolidWorks model")
+    print("=" * 60)
+
+    # --- Connect to running SolidWorks ---
+    swApp = win32com.client.GetActiveObject("SldWorks.Application")
+    swApp.Visible = True
+    print("  Connected to running SolidWorks instance.")
+
+    # --- Constants ---
+    swUnitSystem_MMGS = 2
+
+    # --- Resolve template ---
+    defaultTemplate = resolve_sw_template(swApp, config.get("sw_template"))
+    print(f"  Using template: {defaultTemplate}")
+
+    swModel = swApp.NewDocument(defaultTemplate, 0, 0, 0)
+    print(f"  NewDocument returned: {type(swModel).__name__} = {swModel}")
+
+    # Get the active document reference
+    swModel = swApp.ActiveDoc
+    if swModel is None:
+        raise RuntimeError("Failed to create new part document in SolidWorks!")
+    try:
+        title = swModel.GetTitle
+        print(f"  New part created: {title}")
+    except Exception:
+        print(f"  New part created.")
+
+    # --- Set units to millimeters (MMGS) ---
+    swModelDocExt = swModel.Extension
+    try:
+        swModelDocExt.SetUserPreferenceInteger(175, 0, swUnitSystem_MMGS)
+    except Exception:
+        try:
+            swModelDocExt.SetUserPreferenceInteger(11, 0, 0)
+        except Exception:
+            pass  # Units may already be mm from template
+    print("  Units set to MMGS (millimeters).")
+
+    # --- Select the Right YZ Plane for sketching ---
+    _select_right_plane(swModel)
+
+    # --- Open sketch ---
+    swModel.SketchManager.InsertSketch(True)
+    skActive = swModel.SketchManager.ActiveSketch
+    print(f"  Sketch opened. Active sketch: {skActive}")
+
+    # --- Draw the lens profile into the active sketch ---
+    _draw_lens_profile(swModel, profile_points, semi_diam, thickness,
+                       num_points, surfaces, surf_front, surf_back, profile_info)
+
+    # --- Exit sketch ---
+    swModel.SketchManager.InsertSketch(True)
+    print("  Sketch closed.")
+
+    # --- Perform revolve ---
+    _revolve_active_sketch(swModel)
+
+    # --- Rebuild and zoom to fit ---
+    _rebuild_and_fit(swModel)
     print("\n  Done! Lens solid model created in SolidWorks.")
     print(f"  Lens diameter: {2 * semi_diam:.4f} mm")
     print(f"  Center thickness: {thickness:.4f} mm")
@@ -720,6 +903,14 @@ Examples:
   %(prog)s MyLens.zmx --front 2 --back 3
   %(prog)s MyLens.zmx --front 7 --back 8 --points 200
   %(prog)s MyLens.zmx --front 2 --back 3 --template "C:\\Templates\\Part(mm).prtdot"
+  %(prog)s MyLens.zmx --front 2 --back 3 --update
+
+Update mode:
+  --update targets the ACTIVE open SolidWorks part. It edits an existing sketch
+  (default 'Sketch1') in place: deletes its entities and draws the new closed
+  lens profile with a fresh centerline. The revolve stays in the tree but loses
+  its profile/axis references, so afterwards edit the revolve and re-select the
+  profile and axis, then rebuild.
 
 Configuration file:
   Place a 'zemax_to_solidworks.json' next to this script or in your home
@@ -746,6 +937,17 @@ Configuration file:
         "--template", type=str, default=None,
         help="Path to SolidWorks .prtdot part template (default: auto-detect)",
     )
+    parser.add_argument(
+        "--update", action="store_true",
+        help="Update the ACTIVE open SolidWorks part instead of creating a new file. "
+             "Edits an existing sketch in place (deletes its entities and redraws the "
+             "profile); afterwards re-select the profile and axis in your revolve.",
+    )
+    parser.add_argument(
+        "--sketch", type=str, default=None,
+        help="Name of the sketch to edit in --update mode "
+             "(default: from config 'update_sketch_name' or 'Sketch1').",
+    )
     return parser.parse_args()
 
 
@@ -763,10 +965,15 @@ def main():
     num_points = args.points or config.get("num_points", 150)
     if args.template:
         config["sw_template"] = args.template
+    sketch_name = args.sketch or config.get("update_sketch_name", "Sketch1")
 
     print(f"  Lens file: {lens_file}")
     print(f"  Surfaces:  front={surf_front}, back={surf_back}")
     print(f"  Points:    {num_points}")
+    if args.update:
+        print(f"  Mode:      UPDATE active part (edit '{sketch_name}' in place)")
+    else:
+        print(f"  Mode:      NEW part")
     print()
 
     # Phase 1: Extract parameters from Zemax
@@ -777,9 +984,13 @@ def main():
         surfaces, surf_front, surf_back, num_points
     )
 
-    # Phase 3: Build the solid in SolidWorks
-    build_solidworks_model(profile_points, semi_diam, thickness, num_points, config,
-                           surfaces, surf_front, surf_back, profile_info)
+    # Phase 3: Build or update the solid in SolidWorks
+    if args.update:
+        update_existing_model(profile_points, semi_diam, thickness, num_points, config,
+                              surfaces, surf_front, surf_back, profile_info, sketch_name)
+    else:
+        build_solidworks_model(profile_points, semi_diam, thickness, num_points, config,
+                               surfaces, surf_front, surf_back, profile_info)
 
 
 if __name__ == '__main__':
